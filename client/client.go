@@ -17,17 +17,25 @@ type ConnInfo struct {
 	port int
 }
 
-var mu sync.Mutex
-var heartbeatBytes = []byte("&hb") // + 这是心跳包的字节
-var heartbeatLen = len(heartbeatBytes)
-var connectionPairMap = make(map[string]net.Conn)
+var (
+	mu                sync.Mutex
+	heartbeatBytes    = []byte("&hb") // + 这是心跳包的字节
+	heartbeatLen      = len(heartbeatBytes)
+	connectionPairMap = make(map[string]net.Conn)
 
-var idCounter int
-var localConnInfo *ConnInfo
-var serverConnInfo *ConnInfo
-var localPort int
-var serverAddr string
+	idCounter      int
+	localConnInfo  *ConnInfo
+	serverConnInfo *ConnInfo
+	localPort      int
+	serverAddr     string
+	logDebug       bool
+)
 
+func debugLog(format string, args ...interface{}) {
+	if logDebug {
+		fmt.Printf(format, args...)
+	}
+}
 func sendCommand(clientConn net.Conn, command string) {
 	_, err := fmt.Fprintf(clientConn, "%s\n", command)
 	if err != nil {
@@ -202,9 +210,9 @@ func copyData(direction string, needCheckConn bool, errChannel chan<- error, dir
 				fmt.Printf("==dst local conn changed to %s.\n", localConnInfo.id)
 				dst = localConnInfo.conn
 			} else {
-				fmt.Printf("++dst server conn changed to %s.\n", serverConnInfo.id)
+				debugLog("++dst server conn changed to %s.\n", serverConnInfo.id)
 				dst = serverConnInfo.conn
-				fmt.Printf("++src local conn changed to %s.\n", localConnInfo.id)
+				debugLog("++src local conn changed to %s.\n", localConnInfo.id)
 				src = localConnInfo.conn
 			}
 			mu.Unlock()
@@ -215,7 +223,7 @@ func copyData(direction string, needCheckConn bool, errChannel chan<- error, dir
 		if err != nil {
 			if err == io.EOF {
 				// 连接关闭
-				fmt.Printf("Connection closed by the source side. [%s]\n", direction)
+				debugLog("Connection closed by the source side. [%s]\n", direction)
 				tempSrc, errConnSrc := checkConn(src, !srcIsServer)
 				if errConnSrc != nil {
 					// tempDst非空，说明重连成功，给赋值回去
@@ -236,18 +244,18 @@ func copyData(direction string, needCheckConn bool, errChannel chan<- error, dir
 
 		// 没有bytes需要被转发，跳过
 		if n == 0 {
-			fmt.Printf("no bytes need to be write [%s], continue.\n", direction)
+			debugLog("no bytes need to be write [%s], continue.\n", direction)
 			continue
 		}
 
 		// 判断是否为心跳包, 如果是心跳包不处理跳过
 		if bytes.Equal(bytes.TrimSpace(buf[:heartbeatLen]), heartbeatBytes) {
-			fmt.Println("Received heartbeat")
+			debugLog("Received heartbeat")
 			continue
 		}
 
 		// 输出调试信息，包括dst和src的IP和端口
-		fmt.Printf("Copied %d bytes from %s to %s %s\n", n,
+		debugLog("Copied %d bytes from %s to %s %s\n", n,
 			src.RemoteAddr(),
 			dst.RemoteAddr(),
 			direction)

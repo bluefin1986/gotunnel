@@ -15,10 +15,19 @@ type ClientInfo struct {
 	localPort int
 }
 
-var mu sync.Mutex
-var connectionsMap = make(map[string]net.Conn)
-var idCounter int
-var heartbeatBytes = []byte("&hb\n")
+var (
+	mu             sync.Mutex
+	connectionsMap = make(map[string]net.Conn)
+	idCounter      int
+	heartbeatBytes = []byte("&hb\n")
+	logDebug       = false
+)
+
+func debugLog(format string, args ...interface{}) {
+	if logDebug {
+		fmt.Printf(format, args...)
+	}
+}
 
 func handleClient(clientConn net.Conn, wg *sync.WaitGroup, clientInfo *ClientInfo) {
 	defer wg.Done()
@@ -70,7 +79,7 @@ func copyData(dst net.Conn, src net.Conn, id string, direction string) {
 		// mu.Unlock()
 
 		if !exists {
-			fmt.Printf("Connection with id %d does not exist. Closing copyData %s\n", id, direction)
+			fmt.Printf("Connection with id %s does not exist. Closing copyData %s\n", id, direction)
 			break
 		}
 		// 设置读取截止时间为10毫秒，免得断开检测过长
@@ -105,7 +114,7 @@ func copyData(dst net.Conn, src net.Conn, id string, direction string) {
 		}
 
 		// 打印调试信息
-		fmt.Printf("Copying %d bytes from %s to %s\n", n, src.RemoteAddr(), dst.RemoteAddr())
+		debugLog("Copying %d bytes from %s to %s\n", n, src.RemoteAddr(), dst.RemoteAddr())
 
 		// 复制数据
 		_, err = dst.Write(buf[:n])
