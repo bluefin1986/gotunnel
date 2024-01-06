@@ -18,7 +18,7 @@ type ConnInfo struct {
 }
 
 var mu sync.Mutex
-var heartbeatBytes = []byte("&hb")
+var heartbeatBytes = []byte("&hb") // + 这是心跳包的字节
 var heartbeatLen = len(heartbeatBytes)
 var connectionPairMap = make(map[string]net.Conn)
 
@@ -64,13 +64,12 @@ func forwardToLocal(localPort int, serverConn net.Conn) {
 	}
 	mu.Unlock()
 	defer localConn.Close()
-	// fmt.Printf("Connected to local addr %s\n", localAddr)
 
 	// 开始进行端口映射
 	errChannel := make(chan error)
 	directionChannel := make(chan string)
-	go copyData("server>local", true)
-	go copyData("local>server", false)
+	go copyData("server>local", true, errChannel, directionChannel)
+	go copyData("local>server", false, errChannel, directionChannel)
 
 	select {
 	case copyDataErr := <-errChannel:
@@ -152,7 +151,7 @@ func generateID() string {
 	return fmt.Sprintf("conn%d", idCounter)
 }
 
-func copyData(direction string, needCheckConn bool) (string, error) {
+func copyData(direction string, needCheckConn bool, errChannel chan<- error, directionChannel chan<- string) {
 	sourceName := strings.Split(direction, ">")[0]
 	srcIsServer := sourceName == "server"
 	buf := make([]byte, 1024)
@@ -164,7 +163,10 @@ func copyData(direction string, needCheckConn bool) (string, error) {
 	} else {
 		src = localConnInfo.conn
 		if serverConnInfo == nil {
-			return direction, errors.New("server connection info is nil")
+			errChannel <- errors.New("server connection info is nil")
+			directionChannel <- direction
+			mu.Unlock()
+			return
 		}
 		dst = serverConnInfo.conn
 	}
@@ -263,7 +265,8 @@ func copyData(direction string, needCheckConn bool) (string, error) {
 	}
 
 	fmt.Printf("Closing copyData goroutine [%s]. \n", direction)
-	return direction, nil
+	errChannel <- nil
+	directionChannel <- direction
 }
 
 func connToServer() net.Conn {
@@ -301,8 +304,8 @@ func connToServer() net.Conn {
 }
 
 func main() {
-	// serverAddr = "192.168.50.192:6000"
-	serverAddr = "127.0.0.1:6000"
+	serverAddr = "192.168.50.192:6000"
+	// serverAddr = "127.0.0.1:6000"
 	localPort = 5900
 	serverConn := connToServer()
 

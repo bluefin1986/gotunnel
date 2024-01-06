@@ -10,27 +10,26 @@ import (
 	"time"
 )
 
-var clientInfo *ClientInfo
-var mu sync.Mutex
-var connectionsMap = make(map[string]net.Conn)
-var idCounter int
-var heartbeatBytes = []byte("&hb\n")
-
 type ClientInfo struct {
 	conn      net.Conn
 	localPort int
 }
 
-func handleClient(clientConn net.Conn, wg *sync.WaitGroup) {
+var mu sync.Mutex
+var connectionsMap = make(map[string]net.Conn)
+var idCounter int
+var heartbeatBytes = []byte("&hb\n")
+
+func handleClient(clientConn net.Conn, wg *sync.WaitGroup, clientInfo *ClientInfo) {
 	defer wg.Done()
 	// 关闭超时
 	clientConn.SetReadDeadline(time.Time{})
 
 	// 启动心跳 goroutine
-	go sendHeartbeat(clientConn)
+	go sendHeartbeat(clientConn, clientInfo)
 
 	mu.Lock()
-	clientInfo = &ClientInfo{
+	*clientInfo = ClientInfo{
 		conn: clientConn,
 	}
 	mu.Unlock()
@@ -41,7 +40,7 @@ func handleClient(clientConn net.Conn, wg *sync.WaitGroup) {
 	wg.Wait()
 }
 
-func handleOtherClient(otherClientConn net.Conn) {
+func handleOtherClient(otherClientConn net.Conn, clientInfo *ClientInfo) {
 	id := generateID()
 
 	mu.Lock()
@@ -125,8 +124,8 @@ func copyData(dst net.Conn, src net.Conn, id string, direction string) {
 	fmt.Printf("Closing copyData %s\n", direction)
 }
 
-func sendHeartbeat(conn net.Conn) {
-	ticker := time.NewTicker(1 * time.Second)
+func sendHeartbeat(conn net.Conn, clientInfo *ClientInfo) {
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -135,7 +134,9 @@ func sendHeartbeat(conn net.Conn) {
 			// 定期向客户端发送心跳
 			_, err := conn.Write(heartbeatBytes)
 			if err != nil {
+				mu.Lock()
 				clientInfo = nil
+				mu.Unlock()
 				fmt.Println("Error sending heartbeat:", err)
 				fmt.Println("Clear clientInfo")
 				return
@@ -157,6 +158,7 @@ func main() {
 	fmt.Printf("Server listening on port %d...\n", port)
 
 	var wg sync.WaitGroup
+	var clientInfo ClientInfo
 
 	for {
 		clientConn, err := listener.Accept()
@@ -169,7 +171,7 @@ func main() {
 
 		mu.Lock()
 		// 客户端还没连接上来，尝试接收连接的指令，判断是不是自己的客户端
-		if clientInfo == nil {
+		if clientInfo.conn == nil {
 			mu.Unlock()
 			// 创建一个新的 Reader，确保 handleClient 中的读取不影响 main 中的读取
 			reader := io.MultiReader(clientConn, strings.NewReader("\n"))
@@ -182,13 +184,13 @@ func main() {
 			if strings.TrimSpace(command) == "sp" {
 				fmt.Printf("Received client conn: %s\n", clientConn.RemoteAddr())
 				// 处理 client.go 的连接
-				go handleClient(clientConn, &wg)
+				go handleClient(clientConn, &wg, &clientInfo)
 			}
 		} else {
 			mu.Unlock()
 			fmt.Printf("Received other client conn: %s\n", clientConn.RemoteAddr())
 			// 处理其他类型的连接
-			go handleOtherClient(clientConn)
+			go handleOtherClient(clientConn, &clientInfo)
 		}
 	}
 }
