@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -18,10 +19,13 @@ type ConnInfo struct {
 }
 
 var (
-	mu                sync.Mutex
-	heartbeatBytes    = []byte("&hb") // + 这是心跳包的字节
-	heartbeatLen      = len(heartbeatBytes)
-	connectionPairMap = make(map[string]net.Conn)
+	mu                   sync.Mutex
+	heartbeatBytes       = []byte("&hb") // + 这是心跳包的字节
+	heartbeatLen         = len(heartbeatBytes)
+	startForwardBytes    = []byte("&st") // + 这是服务端发来的开始copy的指令字节
+	startForwardBytesLen = len(startForwardBytes)
+	successBytes         = []byte("0\n")
+	connectionPairMap    = make(map[string]net.Conn)
 
 	idCounter      int
 	localConnInfo  *ConnInfo
@@ -29,6 +33,7 @@ var (
 	localPort      int
 	serverAddr     string
 	logDebug       bool
+	useTLS         bool
 )
 
 func debugLog(format string, args ...interface{}) {
@@ -104,7 +109,7 @@ func checkConn(conn net.Conn, isServer bool) (net.Conn, error) {
 				serverConnInfo = nil
 				mu.Unlock()
 				fmt.Printf("===retry [%d/%d] conn to server\n", attempt, retryMaxCount)
-				newConn := connToServer()
+				newConn := connToServer(useTLS)
 				if newConn != nil {
 					fmt.Printf("===Reconnected to server %s successfully, server conn id [%s].\n", serverAddr, serverConnInfo.id)
 				} else {
@@ -248,9 +253,7 @@ func copyData(direction string, needCheckConn bool, errChannel chan<- error, dir
 			continue
 		}
 
-		// 判断是否为心跳包, 如果是心跳包不处理跳过
-		if bytes.Equal(bytes.TrimSpace(buf[:heartbeatLen]), heartbeatBytes) {
-			debugLog("Received heartbeat")
+		if isHeartBeat(bytes.TrimSpace(buf[:heartbeatLen])) {
 			continue
 		}
 
@@ -262,6 +265,10 @@ func copyData(direction string, needCheckConn bool, errChannel chan<- error, dir
 		if srcIsServer {
 			dst = localConnInfo.conn
 		} else {
+			if serverConnInfo == nil {
+				fmt.Println("serverConnInfo is nil , break loop")
+				break
+			}
 			dst = serverConnInfo.conn
 		}
 		// 复制数据
@@ -277,7 +284,16 @@ func copyData(direction string, needCheckConn bool, errChannel chan<- error, dir
 	directionChannel <- direction
 }
 
-func connToServer() net.Conn {
+func isHeartBeat(receivedBytes []byte) bool {
+	// 判断是否为心跳包, 如果是心跳包不处理跳过
+	if bytes.Equal(receivedBytes, heartbeatBytes) {
+		debugLog("Received heartbeat\n")
+		return true
+	}
+	return false
+}
+
+func connToServer(useTLS bool) net.Conn {
 	mu.Lock()
 	if serverConnInfo != nil {
 		mu.Unlock()
@@ -285,8 +301,19 @@ func connToServer() net.Conn {
 		return serverConnInfo.conn
 	}
 	fmt.Printf("trying connect to server %s...\n", serverAddr)
-	// 连接到服务端
-	serverConn, err := net.Dial("tcp", serverAddr)
+	var serverConn net.Conn
+	var err error
+	if useTLS {
+		// 连接到服务端
+		tlsConfig := &tls.Config{
+			// 这里是示例，实际中应该验证服务器证书
+			InsecureSkipVerify: true,
+		}
+		serverConn, err = tls.Dial("tcp", serverAddr, tlsConfig)
+	} else {
+		serverConn, err = net.Dial("tcp", serverAddr)
+	}
+
 	if err != nil {
 		fmt.Println("Error connecting to server:", err)
 		mu.Unlock()
@@ -311,17 +338,58 @@ func connToServer() net.Conn {
 	return serverConn
 }
 
+func readForwardCommand(serverConn net.Conn) {
+	buf := make([]byte, 10)
+	for {
+		// 读取数据
+		n, err := serverConn.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				// 连接关闭
+				debugLog("Connection closed by the server side. \n")
+				tempServerConn := connToServer(useTLS)
+				serverConn = tempServerConn
+			} else {
+				fmt.Println("Error reading data:", err)
+				break
+			}
+		}
+		if isHeartBeat(bytes.TrimSpace(buf[:heartbeatLen])) {
+			debugLog("Received heartbeat\n")
+			continue
+		}
+		// 判断是否为指令包
+		if bytes.Equal(bytes.TrimSpace(buf[:startForwardBytesLen]), startForwardBytes) {
+			fmt.Printf("Received forward command, send received back\n")
+			_, err := serverConn.Write(successBytes)
+			if err != nil {
+				fmt.Println("send received failed", err)
+				continue
+			}
+			break
+		} else {
+			debugLog("received %d bytes, not forward command yet\n", n)
+		}
+		time.Sleep(1 * time.Second)
+	}
+}
+
 func main() {
 	serverAddr = "192.168.50.192:6000"
 	// serverAddr = "127.0.0.1:6000"
 	localPort = 5900
-	serverConn := connToServer()
+	logDebug = false
+	useTLS = false
+	serverConn := connToServer(useTLS)
 
 	if serverConn == nil {
 		fmt.Println("conn to server failed! check server status")
 		return
 	}
 	defer serverConn.Close()
+
+	//等服务端侧的另一端vnc客户端连上
+	readForwardCommand(serverConn)
 
 	// 进行端口映射
 	for {

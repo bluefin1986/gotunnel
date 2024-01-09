@@ -2,9 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -16,11 +19,13 @@ type ClientInfo struct {
 }
 
 var (
-	mu             sync.Mutex
-	connectionsMap = make(map[string]net.Conn)
-	idCounter      int
-	heartbeatBytes = []byte("&hb\n")
-	logDebug       = false
+	mu                sync.Mutex
+	connectionsMap    = make(map[string]net.Conn)
+	idCounter         int
+	heartbeatBytes    = []byte("&hb\n")
+	startForwardBytes = []byte("&st\n")
+	cmdReceived       = []byte("0")
+	logDebug          = false
 )
 
 func debugLog(format string, args ...interface{}) {
@@ -55,6 +60,8 @@ func handleOtherClient(otherClientConn net.Conn, clientInfo *ClientInfo) {
 	mu.Lock()
 	connectionsMap[id] = otherClientConn
 	mu.Unlock()
+
+	sendStartForward(clientInfo.conn)
 
 	// 开始进行流量转发
 	go func() {
@@ -119,7 +126,8 @@ func copyData(dst net.Conn, src net.Conn, id string, direction string) {
 		// 复制数据
 		_, err = dst.Write(buf[:n])
 		if err != nil {
-			fmt.Println("Error writing data:", err)
+			fmt.Printf("Error writing data:%+v\n", err)
+			// fmt.Println("Error writing data:", err)
 			break
 		}
 	}
@@ -154,23 +162,61 @@ func sendHeartbeat(conn net.Conn, clientInfo *ClientInfo) {
 	}
 }
 
+func sendStartForward(conn net.Conn) bool {
+	_, err := conn.Write(startForwardBytes)
+	if err != nil {
+		fmt.Println("send start forward command failed", err)
+		return false
+	}
+	buf := make([]byte, 10)
+	n, err := conn.Read(buf)
+	if err != nil {
+		fmt.Println("read received status failed", err)
+		return false
+	}
+	resp := bytes.TrimSpace(buf[:n])
+	if !bytes.Equal(resp, cmdReceived) {
+		fmt.Println("read resp [%s], not match anything", string(resp))
+		return false
+	}
+	return true
+}
+
 func main() {
 	port := 6000
-
+	useTLS := false
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	defer listener.Close()
 	if err != nil {
 		fmt.Println("Error listening:", err)
 		return
 	}
-	defer listener.Close()
-
-	fmt.Printf("Server listening on port %d...\n", port)
 
 	var wg sync.WaitGroup
 	var clientInfo ClientInfo
 
 	for {
-		clientConn, err := listener.Accept()
+		var clientConn net.Conn
+		fmt.Printf("Server listening on port %d...\n", port)
+		if useTLS {
+			// 证书和私钥文件的路径
+			certFile := "/path/to/server.crt"
+			keyFile := "/path/to/server.key"
+			// 使用TLS证书和私钥创建TLS配置
+			tlsConfig := &tls.Config{}
+			cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+			if err != nil {
+				fmt.Println("Error loading certificate:", err)
+				os.Exit(1)
+			}
+			tlsConfig.Certificates = []tls.Certificate{cert}
+
+			// 使用tls.NewListener创建TLS监听器
+			tlsListener := tls.NewListener(listener, tlsConfig)
+			clientConn, err = tlsListener.Accept()
+		} else {
+			clientConn, err = listener.Accept()
+		}
 		if err != nil {
 			fmt.Println("Error accepting connection:", err)
 			continue
