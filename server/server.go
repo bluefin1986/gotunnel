@@ -69,7 +69,7 @@ func handleClient(clientConn net.Conn) {
 		}
 		command := strings.TrimSpace(string(buf[:n]))
 		// 打印收到的command
-		debugLog("Received command:[%s] from %s\n", command, clientConn.RemoteAddr())
+		fmt.Printf("Received command:[%s] from %s\n", command, clientConn.RemoteAddr())
 		if strings.HasPrefix(command, CMD_ACK_SUCC) {
 			// 客户端指令接受成功，返回
 			cmdType := command[len(CMD_ACK_SUCC)+1:]
@@ -100,10 +100,13 @@ func handleClient(clientConn net.Conn) {
 			connectionsMap[connectionPairId] = connectionInfo
 			mu.Unlock()
 			// 把connectionInfo中暂存的来自其他客户端的firstBatchBytes发送给自己的客户端tunnelConn
-			_, err := connectionInfo.tunnelConn.Write(connectionInfo.firstBatchBytes)
-			if err != nil {
-				fmt.Printf("Error writing firstBatchBytes to tunnelConn:%+v\n", err)
-				break
+			// 如果firstBatchBytes 非空才发送
+			if len(connectionInfo.firstBatchBytes) > 0 {
+				_, err := connectionInfo.tunnelConn.Write(connectionInfo.firstBatchBytes)
+				if err != nil {
+					fmt.Printf("Error writing firstBatchBytes to tunnelConn:%+v\n", err)
+					break
+				}
 			}
 			// 建立数据通道
 			establishDataChannel(connectionInfo)
@@ -112,7 +115,7 @@ func handleClient(clientConn net.Conn) {
 			// 客户端连接成功，保存指令通道
 			cmdConn = clientConn
 			muCmd.Lock()
-			cmdConn.Write([]byte(CMD_ACK_SUCC))
+			cmdConn.Write([]byte(CMD_ACK_SUCC + "\n"))
 			muCmd.Unlock()
 			fmt.Printf("Client connected, use it as cmd connection [%s] \n", cmdConn.RemoteAddr())
 			go sendHeartbeat()
@@ -139,8 +142,10 @@ func handleClient(clientConn net.Conn) {
 }
 
 func establishDataChannel(connectionInfo ConnectionInfo) {
+	muCmd.Lock()
 	go copyData(connectionInfo.clientConn, connectionInfo.tunnelConn, connectionInfo.ID, "tunnel>client")
 	go copyData(connectionInfo.tunnelConn, connectionInfo.clientConn, connectionInfo.ID, "client>tunnel")
+	muCmd.Unlock()
 	debugLog("Data channel established between %s and %s\n", connectionInfo.clientConn.RemoteAddr(), connectionInfo.tunnelConn.RemoteAddr())
 }
 
@@ -158,7 +163,7 @@ func copyData(dst net.Conn, src net.Conn, id string, direction string) {
 		err := src.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 		if err != nil {
 			fmt.Println("Error setting read deadline:", err)
-			// break
+			break
 		}
 
 		// 读取数据
@@ -222,6 +227,12 @@ func sendHeartbeat() {
 		case <-ticker.C:
 			// 定期向客户端发送心跳
 			muCmd.Lock()
+			// 断开连接后， cmdConn 可能已经被销毁，判空一下
+			if cmdConn == nil {
+				muCmd.Unlock()
+				fmt.Println("cmdConn is nil, return")
+				return
+			}
 			_, err := cmdConn.Write([]byte(CMD_HEART_BEAT + "\n"))
 			muCmd.Unlock()
 			if err != nil {

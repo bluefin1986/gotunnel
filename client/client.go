@@ -99,6 +99,10 @@ func handleCommand(cmdConn net.Conn) {
 				continue
 			}
 			connectionPairId := strings.TrimSpace(cmdAndContent[1])
+			//如果connectionPairId 中间包含\n字符，分割以后取第一个
+			if strings.Contains(connectionPairId, "\n") {
+				connectionPairId = strings.Split(connectionPairId, "\n")[0]
+			}
 			// 打印connectionPairId
 			fmt.Printf("connectionPairId is [%s]\n", connectionPairId)
 			// 建立隧道连接
@@ -150,8 +154,12 @@ func connectToTunnel(connectionPairId string) net.Conn {
 		fmt.Println("conn to server failed! check server status")
 		return nil
 	}
+	muCmd.Lock()
 	// 发送 CMD_BUILD_CHANNEL_RESP 加上 connectionPairId返回给服务端
-	_, err := tunnelConn.Write([]byte(CMD_BUILD_CHANNEL_RESP + CMD_DELIMITER + connectionPairId))
+	_, err := tunnelConn.Write([]byte(CMD_BUILD_CHANNEL_RESP + CMD_DELIMITER + connectionPairId + "\n"))
+	// 在这里延迟5毫秒
+	time.Sleep(5 * time.Millisecond)
+	muCmd.Unlock()
 	if err != nil {
 		fmt.Println("send CMD_BUILD_CHANNEL_RESP failed", err)
 		return nil
@@ -195,10 +203,10 @@ func forwardToLocal(localPort int, serverConn net.Conn) {
 		fmt.Println("conn to local failed! check local status")
 		return
 	}
-
+	muCmd.Lock()
 	go copyData(localConn, serverConn, "local>server")
 	go copyData(serverConn, localConn, "server>local")
-
+	muCmd.Unlock()
 	fmt.Printf("forward server connection %s to %s finished\n", serverConn.RemoteAddr(), localConn.RemoteAddr())
 }
 
@@ -254,9 +262,9 @@ func copyData(dst net.Conn, src net.Conn, direction string) {
 }
 
 func main() {
-	// serverAddr = "192.168.50.192:6000"
-	serverAddr = "127.0.0.1:6000"
-	localPort = 1221
+	serverAddr = "192.168.50.192:6000"
+	// serverAddr = "127.0.0.1:6000"
+	localPort = 5900
 	logDebug = false
 	useTLS = false
 
