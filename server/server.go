@@ -121,24 +121,28 @@ func handleClient(clientConn net.Conn) {
 			go sendHeartbeat()
 			break
 		} else {
-			// 这里就是其他的连接，存起来，等客户端新建连接上来以后配对
-			connectionPairId := generateID()
-			connectionInfo := ConnectionInfo{
-				ID:              connectionPairId,
-				clientConn:      clientConn,
-				firstBatchBytes: buf[:n],
-			}
-			mu.Lock()
-			connectionsMap[connectionPairId] = connectionInfo
-			mu.Unlock()
-			fmt.Printf("conn[%s] saved to connectionsMap[%s] , call client to build a new channel\n", clientConn.RemoteAddr(), connectionPairId)
-			// 通知客户端建立消息通道
-			muCmd.Lock()
-			cmdConn.Write([]byte(CMD_CONNECT_CHANNEL + CMD_DELIMITER + connectionPairId + "\n"))
-			muCmd.Unlock()
+			handleOtherConnection(clientConn, buf, n)
 			break
 		}
 	}
+}
+
+func handleOtherConnection(clientConn net.Conn, buf []byte, n int) {
+	// 这里就是其他的连接，存起来，等客户端新建连接上来以后配对
+	connectionPairId := generateID()
+	connectionInfo := ConnectionInfo{
+		ID:              connectionPairId,
+		clientConn:      clientConn,
+		firstBatchBytes: buf[:n],
+	}
+	mu.Lock()
+	connectionsMap[connectionPairId] = connectionInfo
+	mu.Unlock()
+	fmt.Printf("conn[%s] saved to connectionsMap[%s] , call client to build a new channel\n", clientConn.RemoteAddr(), connectionPairId)
+	// 通知客户端建立消息通道
+	muCmd.Lock()
+	cmdConn.Write([]byte(CMD_CONNECT_CHANNEL + CMD_DELIMITER + connectionPairId + "\n"))
+	muCmd.Unlock()
 }
 
 func establishDataChannel(connectionInfo ConnectionInfo) {
