@@ -2,8 +2,8 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/tls"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -13,19 +13,35 @@ import (
 	"time"
 )
 
-type ClientInfo struct {
-	conn      net.Conn
-	localPort int
+const (
+	CMD_HEART_BEAT           = "&hb"
+	CMD_CLIENT_HELLO         = "&sp"
+	CMD_CONNECT_CHANNEL      = "&cc"
+	CMD_ACK_SUCC             = "&00"
+	CMD_ACK_FAIL             = "&01"
+	CMD_CONNECT_CHANNEL_RESP = "ccr"
+	CMD_DELIMITER            = ":"
+)
+
+// ConnectionInfo 包含连接信息
+type ConnectionInfo struct {
+	ID              string
+	tunnelConn      net.Conn // 通道连接，也就是自己的客户端连接
+	clientConn      net.Conn // 客户端连接，一般指的是其他客户端软件的连接
+	firstBatchBytes []byte   // 首包消息，其他客户端连接上来以后，暂存首包消息，等自己的客户端连接上来以后转发
 }
 
 var (
-	mu                sync.Mutex
-	connectionsMap    = make(map[string]net.Conn)
-	idCounter         int
-	heartbeatBytes    = []byte("&hb\n")
-	startForwardBytes = []byte("&st\n")
-	cmdReceived       = []byte("0")
-	logDebug          = false
+	connectionsMap = make(map[string]ConnectionInfo)
+	cmdConn        net.Conn
+)
+
+var (
+	mu        sync.Mutex
+	muCmd     sync.Mutex
+	idCounter int
+	logDebug  = false
+	transType string
 )
 
 func debugLog(format string, args ...interface{}) {
@@ -34,43 +50,103 @@ func debugLog(format string, args ...interface{}) {
 	}
 }
 
-func handleClient(clientConn net.Conn, wg *sync.WaitGroup, clientInfo *ClientInfo) {
-	defer wg.Done()
-	// 关闭超时
-	clientConn.SetReadDeadline(time.Time{})
-
-	// 启动心跳 goroutine
-	go sendHeartbeat(clientConn, clientInfo)
-
-	mu.Lock()
-	*clientInfo = ClientInfo{
-		conn: clientConn,
+func handleClient(clientConn net.Conn) {
+	// 识别客户端类型
+	buf := make([]byte, 1024)
+	// 设置clientConn的读超时为10毫秒
+	err := clientConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	if err != nil {
+		fmt.Println("Error setting read deadline:", err)
+		return
 	}
-	mu.Unlock()
 
-	fmt.Println("Client connected.")
-
-	// 等待 client.go 发送完信息后再进行流量转发
-	wg.Wait()
+	for {
+		// 读取数据
+		reader := bufio.NewReader(clientConn)
+		n, err := reader.Read(buf)
+		if err != nil {
+			if err != io.EOF {
+				fmt.Println("Read error:", err)
+			} else {
+				// 连接关闭
+				fmt.Println("Connection closed by the clientConn.")
+			}
+		}
+		command := strings.TrimSpace(string(buf[:n]))
+		// 打印收到的command
+		debugLog("Received command:[%s] from %s\n", command, clientConn.RemoteAddr())
+		if strings.HasPrefix(command, CMD_ACK_SUCC) {
+			// 客户端指令接受成功，返回
+			cmdType := command[len(CMD_ACK_SUCC)+1:]
+			switch cmdType {
+			case "buildChannel":
+				fmt.Printf("build channel cmd is received by client\n")
+			default:
+				fmt.Printf("unknown cmd ack\n")
+			}
+			break
+		} else if strings.HasPrefix(command, CMD_CONNECT_CHANNEL_RESP) {
+			// 客户端连接上来，建立数据通道
+			// 取出连接配对ID
+			connectionPairId := command[len(CMD_CONNECT_CHANNEL_RESP)+1:]
+			// 从connectionsMap 取出对应的connectionInfo
+			mu.Lock()
+			connectionInfo, exists := connectionsMap[connectionPairId]
+			mu.Unlock()
+			if !exists {
+				errmsg := fmt.Sprintf("connectionPairId[%s] does not exist\n", connectionPairId)
+				fmt.Printf(errmsg)
+				// 向客户端发送失败指令，告知其连接失败
+				clientConn.Write([]byte(CMD_ACK_FAIL + errmsg))
+				break
+			}
+			connectionInfo.tunnelConn = clientConn
+			mu.Lock()
+			connectionsMap[connectionPairId] = connectionInfo
+			mu.Unlock()
+			// 把connectionInfo中暂存的来自其他客户端的firstBatchBytes发送给自己的客户端tunnelConn
+			_, err := connectionInfo.tunnelConn.Write(connectionInfo.firstBatchBytes)
+			if err != nil {
+				fmt.Printf("Error writing firstBatchBytes to tunnelConn:%+v\n", err)
+				break
+			}
+			// 建立数据通道
+			establishDataChannel(connectionInfo)
+			break
+		} else if strings.HasPrefix(command, CMD_CLIENT_HELLO) {
+			// 客户端连接成功，保存指令通道
+			cmdConn = clientConn
+			muCmd.Lock()
+			cmdConn.Write([]byte(CMD_ACK_SUCC))
+			muCmd.Unlock()
+			fmt.Printf("Client connected, use it as cmd connection [%s] \n", cmdConn.RemoteAddr())
+			go sendHeartbeat()
+			break
+		} else {
+			// 这里就是其他的连接，存起来，等客户端新建连接上来以后配对
+			connectionPairId := generateID()
+			connectionInfo := ConnectionInfo{
+				ID:              connectionPairId,
+				clientConn:      clientConn,
+				firstBatchBytes: buf[:n],
+			}
+			mu.Lock()
+			connectionsMap[connectionPairId] = connectionInfo
+			mu.Unlock()
+			fmt.Printf("conn[%s] saved to connectionsMap[%s] , call client to build a new channel\n", clientConn.RemoteAddr(), connectionPairId)
+			// 通知客户端建立消息通道
+			muCmd.Lock()
+			cmdConn.Write([]byte(CMD_CONNECT_CHANNEL + CMD_DELIMITER + connectionPairId + "\n"))
+			muCmd.Unlock()
+			break
+		}
+	}
 }
 
-func handleOtherClient(otherClientConn net.Conn, clientInfo *ClientInfo) {
-	id := generateID()
-
-	mu.Lock()
-	connectionsMap[id] = otherClientConn
-	mu.Unlock()
-
-	sendStartForward(clientInfo.conn)
-
-	// 开始进行流量转发
-	go func() {
-		copyData(clientInfo.conn, otherClientConn, id, "other->client")
-	}()
-
-	go func() {
-		copyData(otherClientConn, clientInfo.conn, id, "client->other")
-	}()
+func establishDataChannel(connectionInfo ConnectionInfo) {
+	go copyData(connectionInfo.clientConn, connectionInfo.tunnelConn, connectionInfo.ID, "tunnel>client")
+	go copyData(connectionInfo.tunnelConn, connectionInfo.clientConn, connectionInfo.ID, "client>tunnel")
+	debugLog("Data channel established between %s and %s\n", connectionInfo.clientConn.RemoteAddr(), connectionInfo.tunnelConn.RemoteAddr())
 }
 
 func generateID() string {
@@ -79,21 +155,15 @@ func generateID() string {
 }
 
 func copyData(dst net.Conn, src net.Conn, id string, direction string) {
+	defer dst.Close()
+	defer src.Close()
 	buf := make([]byte, 1024)
 	for {
-		// mu.Lock()
-		_, exists := connectionsMap[id]
-		// mu.Unlock()
-
-		if !exists {
-			fmt.Printf("Connection with id %s does not exist. Closing copyData %s\n", id, direction)
-			break
-		}
 		// 设置读取截止时间为10毫秒，免得断开检测过长
 		err := src.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 		if err != nil {
 			fmt.Println("Error setting read deadline:", err)
-			break
+			// break
 		}
 
 		// 读取数据
@@ -101,27 +171,27 @@ func copyData(dst net.Conn, src net.Conn, id string, direction string) {
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				// 超时，说明连接还在，继续下一轮循环
-				continue
+				// continue
 			}
 
 			if err == io.EOF {
 				// 连接关闭
-				fmt.Println("Connection closed by the other side.")
+				fmt.Println("Connection closed by the other side.\n")
 				// continue
 			} else {
-				fmt.Println("Error reading data:", err)
+				debugLog("Error reading data:%+v\n", err)
 			}
-			break
+			// break
 		}
 
 		// 没有bytes需要被转发，跳过
 		if n == 0 {
-			fmt.Printf("no bytes need to be write [%s], continue.\n", direction)
+			// fmt.Printf("no bytes need to be write [%s], break.\n", direction)
 			continue
 		}
 
 		// 打印调试信息
-		debugLog("Copying %d bytes from %s to %s\n", n, src.RemoteAddr(), dst.RemoteAddr())
+		debugLog("Copying %d bytes from %s to %s %s, content:[%s]\n", n, src.RemoteAddr(), dst.RemoteAddr(), direction, string(buf[:n]))
 
 		// 复制数据
 		_, err = dst.Write(buf[:n])
@@ -131,58 +201,49 @@ func copyData(dst net.Conn, src net.Conn, id string, direction string) {
 			break
 		}
 	}
-	// 关闭连接
-	// mu.Lock()
-	if conn, exists := connectionsMap[id]; exists {
-		conn.Close()
-		delete(connectionsMap, id)
+	// 连接断开，从connectionsMap中删除对应的 connectionInfo
+	mu.Lock()
+	if _, ok := connectionsMap[id]; !ok {
+		fmt.Printf("connectionInfo [%s] already removed\n", id)
+		mu.Unlock()
+		return
 	}
-	// mu.Unlock()
+	delete(connectionsMap, id)
+	mu.Unlock()
 	fmt.Printf("Closing copyData %s\n", direction)
 }
 
-func sendHeartbeat(conn net.Conn, clientInfo *ClientInfo) {
-	ticker := time.NewTicker(500 * time.Millisecond)
+func sendHeartbeat() {
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+
+	if cmdConn == nil {
+		fmt.Println("cmdConn is nil, return")
+		return
+	}
 
 	for {
 		select {
 		case <-ticker.C:
 			// 定期向客户端发送心跳
-			_, err := conn.Write(heartbeatBytes)
+			muCmd.Lock()
+			_, err := cmdConn.Write([]byte(CMD_HEART_BEAT + "\n"))
+			muCmd.Unlock()
 			if err != nil {
 				mu.Lock()
-				clientInfo = nil
+				cmdConn = nil
 				mu.Unlock()
 				fmt.Println("Error sending heartbeat:", err)
-				fmt.Println("Clear clientInfo")
 				return
 			}
 		}
 	}
 }
 
-func sendStartForward(conn net.Conn) bool {
-	_, err := conn.Write(startForwardBytes)
-	if err != nil {
-		fmt.Println("send start forward command failed", err)
-		return false
-	}
-	buf := make([]byte, 10)
-	n, err := conn.Read(buf)
-	if err != nil {
-		fmt.Println("read received status failed", err)
-		return false
-	}
-	resp := bytes.TrimSpace(buf[:n])
-	if !bytes.Equal(resp, cmdReceived) {
-		fmt.Println("read resp [%s], not match anything", string(resp))
-		return false
-	}
-	return true
-}
-
 func main() {
+	flag.StringVar(&transType, "transType", "vnc", "Specify the transport type")
+	flag.Parse()
+
 	port := 6000
 	useTLS := false
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
@@ -191,13 +252,10 @@ func main() {
 		fmt.Println("Error listening:", err)
 		return
 	}
-
-	var wg sync.WaitGroup
-	var clientInfo ClientInfo
+	fmt.Printf("Server listening on port %d...\n", port)
 
 	for {
 		var clientConn net.Conn
-		fmt.Printf("Server listening on port %d...\n", port)
 		if useTLS {
 			// 证书和私钥文件的路径
 			certFile := "/path/to/server.crt"
@@ -221,31 +279,8 @@ func main() {
 			fmt.Println("Error accepting connection:", err)
 			continue
 		}
-
-		wg.Add(1)
-
-		mu.Lock()
-		// 客户端还没连接上来，尝试接收连接的指令，判断是不是自己的客户端
-		if clientInfo.conn == nil {
-			mu.Unlock()
-			// 创建一个新的 Reader，确保 handleClient 中的读取不影响 main 中的读取
-			reader := io.MultiReader(clientConn, strings.NewReader("\n"))
-
-			// 读取客户端指令
-			scanner := bufio.NewScanner(reader)
-			scanner.Scan()
-			command := scanner.Text()
-			fmt.Printf("Received command: %s\n", command)
-			if strings.TrimSpace(command) == "sp" {
-				fmt.Printf("Received client conn: %s\n", clientConn.RemoteAddr())
-				// 处理 client.go 的连接
-				go handleClient(clientConn, &wg, &clientInfo)
-			}
-		} else {
-			mu.Unlock()
-			fmt.Printf("Received other client conn: %s\n", clientConn.RemoteAddr())
-			// 处理其他类型的连接
-			go handleOtherClient(clientConn, &clientInfo)
-		}
+		//打印客户端连接地址
+		fmt.Printf("===>new Client %s connected.\n", clientConn.RemoteAddr())
+		handleClient(clientConn)
 	}
 }
