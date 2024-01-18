@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
-	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -34,14 +33,10 @@ type ConnectionInfo struct {
 var (
 	connectionsMap = make(map[string]ConnectionInfo)
 	cmdConn        net.Conn
-)
-
-var (
-	mu        sync.Mutex
-	muCmd     sync.Mutex
-	idCounter int
-	logDebug  = false
-	transType string
+	mu             sync.Mutex
+	muCmd          sync.Mutex
+	idCounter      int
+	logDebug       = false
 )
 
 func debugLog(format string, args ...interface{}) {
@@ -176,7 +171,7 @@ func copyData(dst net.Conn, src net.Conn, id string, direction string) {
 
 			if err == io.EOF {
 				// 连接关闭
-				fmt.Println("Connection closed by the other side.\n")
+				debugLog("Connection closed by the other side.\n")
 				// continue
 			} else {
 				debugLog("Error reading data:%+v\n", err)
@@ -241,9 +236,6 @@ func sendHeartbeat() {
 }
 
 func main() {
-	flag.StringVar(&transType, "transType", "vnc", "Specify the transport type")
-	flag.Parse()
-
 	port := 6000
 	useTLS := false
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
