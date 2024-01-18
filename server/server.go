@@ -162,7 +162,7 @@ func copyData(dst net.Conn, src net.Conn, id string, direction string) {
 		// 设置读取截止时间为10毫秒，免得断开检测过长
 		err := src.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 		if err != nil {
-			fmt.Println("Error setting read deadline:", err)
+			debugLog("Error setting read deadline: %+v\n", err)
 			break
 		}
 
