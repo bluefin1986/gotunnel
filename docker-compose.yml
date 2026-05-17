@@ -1,0 +1,21 @@
+services:
+  gotunnel-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: gotunnel-server
+    restart: unless-stopped
+    environment:
+      GOTUNNEL_CONTROL_ADDR: ":6000"
+      GOTUNNEL_VISITOR_ADDR: ":6001"
+    command:
+      - -control
+      - ${GOTUNNEL_CONTROL_ADDR:-:6000}
+      - -visitor
+      - ${GOTUNNEL_VISITOR_ADDR:-:6001}
+      - -debug=${GOTUNNEL_DEBUG:-false}
+    ports:
+      # Client control/tunnel回连端口
+      - "${GOTUNNEL_CONTROL_PORT:-6000}:6000"
+      # 外部访问入口端口；如果只允许一个端口，可把 GOTUNNEL_VISITOR_ADDR 改成 :6000，并只暴露 6000
+      - "${GOTUNNEL_VISITOR_PORT:-6001}:6001"
