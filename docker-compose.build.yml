@@ -1,0 +1,19 @@
+services:
+  gotunnel-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+      platforms:
+        - ${GOTUNNEL_PLATFORM:-linux/amd64}
+    image: ${GOTUNNEL_IMAGE:-gotunnel-server:latest}
+    container_name: gotunnel-server
+    restart: unless-stopped
+    command:
+      - -control
+      - ${GOTUNNEL_CONTROL_ADDR:-:6000}
+      - -visitor
+      - ${GOTUNNEL_VISITOR_ADDR:-:43090}
+      - -debug=${GOTUNNEL_DEBUG:-false}
+    ports:
+      - "${GOTUNNEL_CONTROL_PORT:-6000}:6000"
+      - "${GOTUNNEL_VISITOR_PORT:-43090}:43090"
