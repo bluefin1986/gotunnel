@@ -10,6 +10,7 @@ if "%GOTUNNEL_LOCAL_ADDR%"=="" (set "LOCAL_ADDR=127.0.0.1:5900") else (set "LOCA
 if "%GOTUNNEL_TLS%"=="" (set "USE_TLS=false") else (set "USE_TLS=%GOTUNNEL_TLS%")
 if "%GOTUNNEL_DEBUG%"=="" (set "DEBUG=false") else (set "DEBUG=%GOTUNNEL_DEBUG%")
 set "BUILD_ONLY=false"
+set "GO_RUN=false"
 
 :parse_args
 if "%~1"=="" goto after_parse
@@ -31,6 +32,11 @@ if /I "%~1"=="--debug" (
 )
 if /I "%~1"=="--build-only" (
   set "BUILD_ONLY=true"
+  shift
+  goto parse_args
+)
+if /I "%~1"=="--go-run" (
+  set "GO_RUN=true"
   shift
   goto parse_args
 )
@@ -58,6 +64,26 @@ shift
 goto parse_args
 
 :after_parse
+if not exist "%ROOT_DIR%\go.mod" (
+  echo [gotunnel] ERROR: go.mod not found under "%ROOT_DIR%" 1>&2
+  echo [gotunnel] Please run this script from the gotunnel project copy: gotunnel\scripts\start-client.cmd 1>&2
+  echo [gotunnel] Or copy the whole gotunnel directory to Windows, not just this .cmd file. 1>&2
+  exit /b 1
+)
+
+if /I "%GO_RUN%"=="true" (
+  echo [gotunnel] starting client with go run
+  echo   server: %SERVER_ADDR%
+  echo   local : %LOCAL_ADDR%
+  echo   tls   : %USE_TLS%
+  echo   debug : %DEBUG%
+  pushd "%ROOT_DIR%" >nul
+  go run ./client -server "%SERVER_ADDR%" -local "%LOCAL_ADDR%" -tls=%USE_TLS% -debug=%DEBUG%
+  set "EXIT_CODE=%ERRORLEVEL%"
+  popd >nul
+  exit /b %EXIT_CODE%
+)
+
 if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
 echo [gotunnel] building client -^> "%BIN%"
 pushd "%ROOT_DIR%" >nul
@@ -99,6 +125,7 @@ echo   -l, --local ADDR    local service address to expose, default: %LOCAL_ADDR
 echo       --tls           connect with TLS
 echo       --debug         enable debug logs
 echo       --build-only    only build client binary
+echo       --go-run        run with go run ./client directly, do not build exe
 echo   -h, --help          show help
 echo.
 echo Environment variables:
@@ -110,6 +137,9 @@ echo.
 echo Demos:
 echo   REM Expose local VNC 5900 through a server running on 1.2.3.4:6000
 echo   %~nx0 --server 1.2.3.4:6000 --local 127.0.0.1:5900
+echo.
+echo   REM Run from source without building exe
+echo   %~nx0 --go-run --server 1.2.3.4:6000 --local 10.x.x.x:43080
 echo.
 echo   REM Expose local RDP 3389
 echo   %~nx0 -s 1.2.3.4:6000 -l 127.0.0.1:3389
