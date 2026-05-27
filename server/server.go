@@ -32,9 +32,10 @@ type ConnectionInfo struct {
 }
 
 type TunnelClient struct {
-	Name    string
-	CmdConn net.Conn
-	MuCmd   sync.Mutex
+	Name     string
+	CmdConn  net.Conn
+	Listener net.Listener
+	MuCmd    sync.Mutex
 }
 
 var (
@@ -157,30 +158,46 @@ func handleControlCommand(conn net.Conn, command string) {
 	}
 }
 
+func closeTunnelListener(tunnelName string) {
+	if client, ok := tunnelClients[tunnelName]; ok {
+		if client.Listener != nil {
+			_ = client.Listener.Close()
+			client.Listener = nil
+		}
+	}
+}
+
 func registerTunnelClient(tunnelName, visitorPort string, cmdConn net.Conn) {
 	muRegistry.Lock()
 	defer muRegistry.Unlock()
 
+	// Close existing tunnel (listener + cmd connection)
 	if old, exists := tunnelClients[tunnelName]; exists {
 		fmt.Printf("replacing existing client for tunnel [%s]\n", tunnelName)
+		if old.Listener != nil {
+			_ = old.Listener.Close()
+		}
 		_ = old.CmdConn.Close()
+		delete(tunnelClients, tunnelName)
 	}
 
-	client := &TunnelClient{
-		Name:    tunnelName,
-		CmdConn: cmdConn,
-	}
-	tunnelClients[tunnelName] = client
-
+	// Create visitor listener BEFORE storing the client
 	addr := ":" + strings.TrimPrefix(visitorPort, ":")
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		fmt.Printf("ERROR: failed to listen on %s for tunnel [%s]: %v\n", addr, tunnelName, err)
 		writeLine(cmdConn, CMD_ACK_FAIL+CMD_DELIMITER+"listen failed: "+err.Error())
 		_ = cmdConn.Close()
-		delete(tunnelClients, tunnelName)
 		return
 	}
+
+	// Now store the client with the listener
+	client := &TunnelClient{
+		Name:     tunnelName,
+		CmdConn:  cmdConn,
+		Listener: listener,
+	}
+	tunnelClients[tunnelName] = client
 
 	fmt.Printf("tunnel [%s] registered, visitor listening on %s, client=%s\n", tunnelName, addr, cmdConn.RemoteAddr())
 	writeLine(cmdConn, CMD_ACK_SUCC+CMD_DELIMITER+tunnelName)
@@ -293,17 +310,24 @@ func generateID() string {
 	return fmt.Sprintf("conn%d", id)
 }
 
+func removeTunnelClient(tunnelName string, conn net.Conn) {
+	muRegistry.Lock()
+	defer muRegistry.Unlock()
+	if client, ok := tunnelClients[tunnelName]; ok && client.CmdConn == conn {
+		if client.Listener != nil {
+			_ = client.Listener.Close()
+		}
+		delete(tunnelClients, tunnelName)
+		fmt.Printf("tunnel [%s] removed\n", tunnelName)
+	}
+}
+
 func consumeCmdConnForTunnel(tunnelName string, conn net.Conn) {
 	reader := bufio.NewReader(conn)
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			muRegistry.Lock()
-			if client, ok := tunnelClients[tunnelName]; ok && client.CmdConn == conn {
-				delete(tunnelClients, tunnelName)
-				fmt.Printf("tunnel [%s] client disconnected\n", tunnelName)
-			}
-			muRegistry.Unlock()
+			removeTunnelClient(tunnelName, conn)
 			_ = conn.Close()
 			return
 		}
@@ -326,11 +350,7 @@ func sendHeartbeatForTunnel(tunnelName string, conn net.Conn) {
 		_, err := fmt.Fprintf(conn, "%s\n", CMD_HEART_BEAT)
 		muRegistry.Unlock()
 		if err != nil {
-			muRegistry.Lock()
-			if c, ok := tunnelClients[tunnelName]; ok && c.CmdConn == conn {
-				delete(tunnelClients, tunnelName)
-			}
-			muRegistry.Unlock()
+			removeTunnelClient(tunnelName, conn)
 			_ = conn.Close()
 			return
 		}
