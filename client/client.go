@@ -23,11 +23,13 @@ const (
 )
 
 var (
-	serverAddr string
-	localAddr  string
-	logDebug   bool
-	useTLS     bool
-	muWrite    sync.Mutex
+	serverAddr  string
+	localAddr   string
+	tunnelName  string
+	visitorPort string
+	logDebug    bool
+	useTLS      bool
+	muWrite     sync.Mutex
 )
 
 func debugLog(format string, args ...interface{}) {
@@ -38,7 +40,9 @@ func debugLog(format string, args ...interface{}) {
 
 func main() {
 	flag.StringVar(&serverAddr, "server", "127.0.0.1:6000", "gotunnel server control address")
-	flag.StringVar(&localAddr, "local", "127.0.0.1:5900", "local TCP address to expose through tunnel")
+	flag.StringVar(&localAddr, "local", "127.0.0.1:22", "local TCP address to expose through tunnel")
+	flag.StringVar(&tunnelName, "tunnel", "default", "tunnel name for this connection")
+	flag.StringVar(&visitorPort, "visitor", "", "visitor port for this tunnel (required)")
 	flag.BoolVar(&useTLS, "tls", false, "connect to server with TLS")
 	flag.BoolVar(&logDebug, "debug", false, "enable debug logs")
 	flag.Parse()
@@ -53,17 +57,37 @@ func main() {
 }
 
 func makeCommandConn() net.Conn {
+	if visitorPort == "" {
+		fmt.Println("-visitor port is required (e.g., -visitor 2222)")
+		return nil
+	}
+
 	cmdConn := connToServer()
 	if cmdConn == nil {
 		fmt.Println("conn to server failed! check server status")
 		return nil
 	}
-	if err := writeLine(cmdConn, CMD_CLIENT_HELLO); err != nil {
-		fmt.Println("send client hello failed:", err)
+
+	// Send hello with tunnel name and the visitor port to listen on
+	// Format: &sp:<tunnelName>:<visitorPort>
+	_, _ = fmt.Fprintf(cmdConn, "%s%s%s%s%s\n", CMD_CLIENT_HELLO, CMD_DELIMITER, tunnelName, CMD_DELIMITER, visitorPort)
+
+	// Wait for ack
+	reader := bufio.NewReader(cmdConn)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Println("read ack failed:", err)
 		_ = cmdConn.Close()
 		return nil
 	}
-	return cmdConn
+	ack := strings.TrimSpace(line)
+	if strings.HasPrefix(ack, CMD_ACK_SUCC) {
+		fmt.Printf("tunnel [%s] registered with server\n", tunnelName)
+		return cmdConn
+	}
+	fmt.Printf("server rejected: %s\n", ack)
+	_ = cmdConn.Close()
+	return nil
 }
 
 func handleCommand(cmdConn net.Conn) {
@@ -89,12 +113,14 @@ func handleCommand(cmdConn net.Conn) {
 			}
 
 		case strings.HasPrefix(command, CMD_CONNECT_CHANNEL):
-			connectionPairId := strings.TrimSpace(strings.TrimPrefix(command, CMD_CONNECT_CHANNEL+CMD_DELIMITER))
+			// &cc:<connId>:<tunnelName>
+			parts := strings.SplitN(strings.TrimPrefix(command, CMD_CONNECT_CHANNEL+CMD_DELIMITER), CMD_DELIMITER, 2)
+			connectionPairId := parts[0]
 			if connectionPairId == "" {
 				fmt.Printf("command [%s] is invalid\n", command)
 				continue
 			}
-			fmt.Printf("build tunnel channel for pair id [%s]\n", connectionPairId)
+			fmt.Printf("build tunnel channel for pair id [%s] on tunnel [%s]\n", connectionPairId, tunnelName)
 			go buildTunnelChannel(connectionPairId)
 
 		case strings.HasPrefix(command, CMD_ACK_SUCC):
@@ -116,11 +142,8 @@ func buildTunnelChannel(connectionPairId string) {
 		return
 	}
 
-	if err := writeLine(tunnelConn, CMD_BUILD_CHANNEL_RESP+CMD_DELIMITER+connectionPairId); err != nil {
-		fmt.Println("send build-channel response failed:", err)
-		_ = tunnelConn.Close()
-		return
-	}
+	// Send build-channel response with tunnel name
+	_, _ = fmt.Fprintf(tunnelConn, "%s%s%s%s%s\n", CMD_BUILD_CHANNEL_RESP, CMD_DELIMITER, connectionPairId, CMD_DELIMITER, tunnelName)
 
 	localConn, err := net.Dial("tcp", localAddr)
 	if err != nil {

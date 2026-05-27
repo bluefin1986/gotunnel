@@ -1,0 +1,44 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "gotunnel-server",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/server",
+      "args": [
+        "-control", ":6000",
+        "-debug"
+      ]
+    },
+    {
+      "name": "gotunnel-client (ssh)",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/client",
+      "args": [
+        "-server", "127.0.0.1:6000",
+        "-local", "127.0.0.1:22",
+        "-tunnel", "ssh",
+        "-visitor", "2222",
+        "-debug"
+      ]
+    },
+    {
+      "name": "gotunnel-client (rdp)",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/client",
+      "args": [
+        "-server", "127.0.0.1:6000",
+        "-local", "127.0.0.1:3389",
+        "-tunnel", "rdp",
+        "-visitor", "3389",
+        "-debug"
+      ]
+    }
+  ]
+}

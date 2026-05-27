@@ -7,11 +7,14 @@ services:
     command:
       - -control
       - ${GOTUNNEL_CONTROL_ADDR:-:6000}
-      - -visitor
-      - ${GOTUNNEL_VISITOR_ADDR:-:43090}
       - -debug=${GOTUNNEL_DEBUG:-false}
     ports:
-      # Client control/tunnel 回连端口，Windows client 连接这个端口
+      # Control port: client connects here
       - "${GOTUNNEL_CONTROL_PORT:-6000}:6000"
-      # Visitor 业务入口端口，llmproxy upstream 连接这个端口
-      - "${GOTUNNEL_VISITOR_PORT:-43090}:43090"
+      # Visitor ports: configured per tunnel, exposed from .env
+      # SSH tunnel
+      - "${GOTUNNEL_SSH_VISITOR_PORT:-2222}:${GOTUNNEL_SSH_VISITOR_PORT:-2222}"
+      # RDP tunnel
+      - "${GOTUNNEL_RDP_VISITOR_PORT:-3389}:${GOTUNNEL_RDP_VISITOR_PORT:-3389}"
+      # VNC tunnel (optional)
+      # - "${GOTUNNEL_VNC_VISITOR_PORT:-5900}:${GOTUNNEL_VNC_VISITOR_PORT:-5900}"
