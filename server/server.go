@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -94,6 +95,10 @@ func acceptLoop(listener net.Listener, handler func(net.Conn)) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				debugLog("listener closed, acceptLoop exiting\n")
+				return
+			}
 			fmt.Println("Error accepting connection:", err)
 			continue
 		}
