@@ -39,7 +39,7 @@ func debugLog(format string, args ...interface{}) {
 }
 
 func main() {
-	flag.StringVar(&serverAddr, "server", "127.0.0.1:6000", "gotunnel server control address")
+	flag.StringVar(&serverAddr, "server", "127.0.0.1:6000", "gotunnel server control address, IPv6 should use [addr]:port or addr:port")
 	flag.StringVar(&localAddr, "local", "127.0.0.1:22", "local TCP address to expose through tunnel")
 	flag.StringVar(&tunnelName, "tunnel", "default", "tunnel name for this connection")
 	flag.StringVar(&visitorPort, "visitor", "", "visitor port for this tunnel (required)")
@@ -166,20 +166,47 @@ func buildTunnelChannel(connectionPairId string) {
 }
 
 func connToServer() net.Conn {
-	fmt.Printf("trying connect to server %s...\n", serverAddr)
+	dialAddr := normalizeTCPAddr(serverAddr)
+	fmt.Printf("trying connect to server %s...\n", dialAddr)
 	var conn net.Conn
 	var err error
 	if useTLS {
-		conn, err = tls.Dial("tcp", serverAddr, &tls.Config{InsecureSkipVerify: true})
+		conn, err = tls.Dial("tcp", dialAddr, &tls.Config{InsecureSkipVerify: true})
 	} else {
-		conn, err = net.DialTimeout("tcp", serverAddr, 10*time.Second)
+		conn, err = net.DialTimeout("tcp", dialAddr, 10*time.Second)
 	}
 	if err != nil {
 		fmt.Println("Error connecting to server:", err)
 		return nil
 	}
-	fmt.Printf("Connected to server %s\n", serverAddr)
+	fmt.Printf("Connected to server %s\n", dialAddr)
 	return conn
+}
+
+func normalizeTCPAddr(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return addr
+	}
+
+	// Already valid host:port, including bracketed IPv6 like [2001:db8::1]:6000.
+	if _, _, err := net.SplitHostPort(addr); err == nil {
+		return addr
+	}
+
+	// Support convenient unbracketed IPv6 input like 2001:db8::1:6000 by treating
+	// the last colon-separated segment as the port and bracketing the host.
+	lastColon := strings.LastIndex(addr, ":")
+	if lastColon <= 0 || lastColon == len(addr)-1 {
+		return addr
+	}
+
+	host := addr[:lastColon]
+	port := addr[lastColon+1:]
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		return net.JoinHostPort(host, port)
+	}
+	return addr
 }
 
 func proxyCopy(dst net.Conn, src net.Conn, direction string, cleanup func()) {
